@@ -15,6 +15,7 @@
 #include "tiny_http.h"
 #include "queue.h"
 #include "console_utils.h"
+#include "th_file_utils.h"
 
 #define PORT 8000
 #define MAX_EVENTS 10
@@ -25,7 +26,11 @@ pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t condition_variable = PTHREAD_COND_INITIALIZER;
 
 tiny_http_t server;
-
+th_route_t* routes = NULL;
+int routes_count = 0;
+/*
+ * It creates file descriptor for TCP socket and call th_create_epoll to create epoll event loop.
+ */
 void th_create_server( const char* ip, int port){
     server.ip_addr = inet_addr(ip);
 	server.tcp_port = htons(port);  
@@ -40,6 +45,9 @@ void th_create_server( const char* ip, int port){
     th_create_epoll();
 }
 
+/* 
+ * Binds the TCP socket to specified IP address, starts listening and calls th_epoll_event_loop
+ */
 void th_server_listen(){
 	struct sockaddr_in s_addr_in;
 	s_addr_in.sin_addr.s_addr = server.ip_addr;
@@ -51,6 +59,9 @@ void th_server_listen(){
   	printf("Server listening for incoming connections\n");
 	th_epoll_event_loop();
 }
+/*
+	* Creates epoll file descriptor, adds TCP socket and STDIN file descriptors
+*/
 
 void th_create_epoll(){
     error_check((server.epollfd = epoll_create1(0)), "Failed to create epoll file descriptor");
@@ -68,7 +79,9 @@ void th_create_epoll(){
 
 
 }
-
+/*
+* Starts epoll event loop
+*/
 void th_epoll_event_loop(){
 	struct epoll_event events_container[MAX_EVENTS];
     int connection_socket, nfds;
@@ -123,7 +136,10 @@ void th_epoll_event_loop(){
 	close(server.tcpfd);
    
 }
-
+/*
+* Still under construction
+* Currently no checks are done. Reads received buffer and sends 200 OK repsonse
+*/
 void* handle_connection(void* ptr_connection_socket){
     int connection_socket = *((int*)ptr_connection_socket);
 
@@ -133,16 +149,27 @@ void* handle_connection(void* ptr_connection_socket){
 	printf("%s", buffer);
 	usleep(500000);
 	//system("clear");
-    request_t* request = malloc(sizeof(request_t));
-    request_string_to_struct(buffer, request);
+    //request_t* request = malloc(sizeof(request_t));
+	//request_string_to_struct(buffer, request);
   
-	const char* response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n <h1>Hello</h1>";
+	const char* response = "HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n <h1>404 Not found</h1>";
+    for(int i = 0; i < routes_count; i++){
+        if(!strcmp(routes[i].method, strtok(buffer, " ")) && !strcmp(routes[i].route, strtok(NULL, " "))){
+			routes->handle_function();
+            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n <h1>Hello</h1>";	
+		}
+	}
+    
+    
+
 	send(connection_socket, response, strlen(response), 0);
-	clean_hl_mem(request->headers_list);
+	//clean_hl_mem(request->headers_list);
 	close(connection_socket);
 	return NULL;
 }
-
+/*
+* Error check for files descriptor related errors
+*/
 void error_check(int status, const char* message){
 	if(status == -1){
         printf("%s -- errno: %i\n", message, errno);
@@ -151,11 +178,19 @@ void error_check(int status, const char* message){
     }
 }
 
+/*
+* TODO: function to gracefully close server when 
+* command received from STDIN or in future signal SIGTERM
+*/
+
 void gracefully_stopserver(){
 	
 }
 
-
+/*
+* Loop for the threads to check 
+* if there is available work for them in queue
+*/
 void* delegate_work(void* arg){
 	while(1){
         int* ptr_connetion_socket;
@@ -172,7 +207,10 @@ void* delegate_work(void* arg){
     return NULL;
 }
 
-// TO-DO increament headers_count and null terminate array
+/*
+* parsing http request string into struct
+* currently using strtok
+*/
 void request_string_to_struct(char* request_string, request_t* request){
 	request->method = strtok(request_string, " ");
 	request->route = strtok(NULL, " ");
@@ -189,6 +227,30 @@ void request_string_to_struct(char* request_string, request_t* request){
 		add_header(head, header);
 	}
     
+}
+/*
+* Adds route to the server
+*/ 
+void th_add_route(const char* method, const char* path, void (*handler_func)()){
+    th_route_t route;
+	route.method = method;
+	route.route = path;
+	route.handle_function = handler_func;
+    
+	printf("Adding route: %s %s\n", method, path);
+
+	if(routes == NULL){
+
+	    printf("route: %s %s is first\n", method, path);
+        routes = malloc(sizeof(th_route_t));
+		*routes = route;
+		routes_count ++;
+	    return;
+	}
+
+
+    routes = realloc(routes, (routes_count + 1) * sizeof(th_route_t));
+    routes[routes_count] = route;
 }
 
 // Needed for QUIC ??

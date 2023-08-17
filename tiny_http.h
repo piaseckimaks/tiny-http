@@ -6,6 +6,12 @@
 typedef char BYTE;
 
 typedef struct{
+    const char* route;
+    const char* method;
+	void (*handle_function)();
+} th_route_t;
+
+typedef struct{
     uint32_t ip_addr;
     uint16_t tcp_port;
 	uint16_t udp_port;
@@ -30,4 +36,6 @@ void request_string_to_struct(char* request_string, request_t* request);
 void th_create_epoll();
 void th_epoll_event_loop();
 void th_server_listen();
+void th_add_route(const char* method, const char* path, void (*handler_func)());
+
 #endif
