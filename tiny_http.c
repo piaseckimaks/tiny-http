@@ -9,25 +9,16 @@
 #include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <sys/un.h>
-#include <unistd.h>
-#include <pthread.h>
 #include <errno.h>
 #include "tiny_http.h"
-#include "queue.h"
 #include "console_utils.h"
 #include "th_file_utils.h"
+#include "th_threading.h"
 
 #define PORT 8000
 #define MAX_EVENTS 10
-#define MAX_THREADS 20
-
-pthread_t thread_pool[MAX_THREADS];
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t condition_variable = PTHREAD_COND_INITIALIZER;
 
 tiny_http_t server;
-th_route_t* routes = NULL;
-int routes_count = 0;
 /*
  * It creates file descriptor for TCP socket and call th_create_epoll to create epoll event loop.
  */
@@ -35,9 +26,7 @@ void th_create_server( const char* ip, int port){
     server.ip_addr = inet_addr(ip);
 	server.tcp_port = htons(port);  
 
-	for(int t = 0; t < MAX_THREADS; t++){
-	    pthread_create(&thread_pool[t], NULL, delegate_work, NULL);
-    }
+  th_create_threads();
 
 	server.tcpfd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -65,9 +54,9 @@ void th_server_listen(){
 */
 
 void th_create_epoll(){
-    error_check((server.epollfd = epoll_create1(0)), "Failed to create epoll file descriptor");
+  error_check((server.epollfd = epoll_create1(0)), "Failed to create epoll file descriptor");
     
-    struct epoll_event ev;
+  struct epoll_event ev;
 	ev.events = EPOLLIN;
 	ev.data.fd = server.tcpfd;
 
@@ -120,16 +109,14 @@ void th_epoll_event_loop(){
                 printf("%s\n", buf);
 				continue;
 			}
-            #endif
+      #endif
+
 			error_check(connection_socket = accept(server.tcpfd, NULL, NULL), "accept");
            
 			if(connection_socket > 0){
-			    int* ptr_connection_socket = malloc(sizeof(int));
-			    *ptr_connection_socket = connection_socket;
-				pthread_mutex_lock(&mutex);
-			    enqueue(ptr_connection_socket);
-				pthread_cond_signal(&condition_variable);
-				pthread_mutex_unlock(&mutex);
+			  int* ptr_connection_socket = malloc(sizeof(int));
+			  *ptr_connection_socket = connection_socket;
+			  th_delegate_work(ptr_connection_socket);	
 			}
 		}
 	}
@@ -137,41 +124,7 @@ void th_epoll_event_loop(){
 	close(server.tcpfd);
    
 }
-/*
-* Still under construction
-*/
-void* handle_connection(void* ptr_connection_socket){
-    int connection_socket = *((int*)ptr_connection_socket);
 
-	char buffer[1024];
-	recv(connection_socket, buffer, 1024, 0);
-
-	printf("%s", buffer);
-	//usleep(500000);
-	//system("clear");
-    //request_t* request = malloc(sizeof(request_t));
-	//request_string_to_struct(buffer, request);
-  char* method = strtok(buffer, " ");
-	char* route = strtok(NULL, " ");
-	
-	printf("Checking route %s with method %s\n", route, method);
-	
-	const char* response = "HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n <h1>404 Not found</h1>";
-    for(int i = 0; i < routes_count; i++){
-		    
-        if(!strcmp(routes[i].method, method) && !strcmp(routes[i].route, route)){
-			      routes->handle_function();
-            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n <h1>Hello</h1>";	
-		}
-	}
-    
-    
-
-	send(connection_socket, response, strlen(response), 0);
-	//clean_hl_mem(request->headers_list);
-	close(connection_socket);
-	return NULL;
-}
 /*
 * Error check for files descriptor related errors
 */
@@ -192,25 +145,6 @@ void gracefully_stopserver(){
 	
 }
 
-/*
-* Loop for the threads to check 
-* if there is available work for them in queue
-*/
-void* delegate_work(void* arg){
-	while(1){
-        int* ptr_connetion_socket;
-        pthread_mutex_lock(&mutex);
-		if((ptr_connetion_socket = dequeue()) == NULL){
-		    pthread_cond_wait(&condition_variable, &mutex);
-			ptr_connetion_socket = dequeue();
-		}
-		pthread_mutex_unlock(&mutex);
-		if (ptr_connetion_socket != NULL) {
-            handle_connection(ptr_connetion_socket);
-		}
-	}
-    return NULL;
-}
 
 /*
 * parsing http request string into struct

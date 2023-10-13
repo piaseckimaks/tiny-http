@@ -31,7 +31,6 @@ void th_create_server(const char* ip, int port);
 void* handle_connection(void* ptr_connection_socket);
 void gracefully_stopserver();
 void error_check(int status, const char* message);
-void* delegate_work(void* arg);
 void request_string_to_struct(char* request_string, request_t* request);
 void th_create_epoll();
 void th_epoll_event_loop();
