@@ -57,6 +57,7 @@ void th_server_listen(){
 	printf("TCP binded to %s port %i\n", inet_ntoa(s_addr_in.sin_addr), ntohs(server.tcp_port));
 	error_check(listen(server.tcpfd, 50), "Listen failed");
   	printf("Server listening for incoming connections\n");
+  	printf("Type stop to gracefully terminate the server\n");
 	th_epoll_event_loop();
 }
 /*
@@ -138,7 +139,6 @@ void th_epoll_event_loop(){
 }
 /*
 * Still under construction
-* Currently no checks are done. Reads received buffer and sends 200 OK repsonse
 */
 void* handle_connection(void* ptr_connection_socket){
     int connection_socket = *((int*)ptr_connection_socket);
@@ -147,15 +147,20 @@ void* handle_connection(void* ptr_connection_socket){
 	recv(connection_socket, buffer, 1024, 0);
 
 	printf("%s", buffer);
-	usleep(500000);
+	//usleep(500000);
 	//system("clear");
     //request_t* request = malloc(sizeof(request_t));
 	//request_string_to_struct(buffer, request);
-  
+  char* method = strtok(buffer, " ");
+	char* route = strtok(NULL, " ");
+	
+	printf("Checking route %s with method %s\n", route, method);
+	
 	const char* response = "HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n <h1>404 Not found</h1>";
     for(int i = 0; i < routes_count; i++){
-        if(!strcmp(routes[i].method, strtok(buffer, " ")) && !strcmp(routes[i].route, strtok(NULL, " "))){
-			routes->handle_function();
+		    
+        if(!strcmp(routes[i].method, method) && !strcmp(routes[i].route, route)){
+			      routes->handle_function();
             response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n <h1>Hello</h1>";	
 		}
 	}
@@ -225,32 +230,30 @@ void request_string_to_struct(char* request_string, request_t* request){
 		token = strtok(NULL, "\n");
 		header->value = token;
 		add_header(head, header);
-	}
-    
+	} 
 }
 /*
 * Adds route to the server
 */ 
 void th_add_route(const char* method, const char* path, void (*handler_func)()){
-    th_route_t route;
+  th_route_t route;
 	route.method = method;
 	route.route = path;
 	route.handle_function = handler_func;
     
 	printf("Adding route: %s %s\n", method, path);
-
 	if(routes == NULL){
-
-	    printf("route: %s %s is first\n", method, path);
-        routes = malloc(sizeof(th_route_t));
+	  printf("route: %s %s is first\n", method, path);
+    routes = malloc(sizeof(th_route_t));
 		*routes = route;
 		routes_count ++;
-	    return;
+	  return;
 	}
 
 
     routes = realloc(routes, (routes_count + 1) * sizeof(th_route_t));
     routes[routes_count] = route;
+		routes_count ++;
 }
 
 // Needed for QUIC ??

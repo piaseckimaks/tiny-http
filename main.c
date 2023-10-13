@@ -37,10 +37,10 @@ int main(int argc, const char** argv){
 	system("clear"); 
 	char* file_content = NULL;
 	th_load_file("./file", file_content);
-    th_create_server("0.0.0.0", 8080);
-    th_add_route("GET", "/", handle_root);	
-    th_add_route("GET", "/login", handle_root);	
-    th_add_route("GET", "/meme", handle_root);	
+  th_create_server("0.0.0.0", 80);
+  th_add_route("GET", "/", handle_root);	
+  th_add_route("GET", "/login", handle_root);	
+  th_add_route("GET", "/meme", handle_root);	
 	th_server_listen();
 	exit(EXIT_SUCCESS);
 }
