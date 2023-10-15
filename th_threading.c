@@ -17,15 +17,16 @@ void th_delegate_work(void* ptr_connection_socket){
 */
 void* th_threads_work(void* arg){
 	while(1){
-        int* ptr_connetion_socket;
+        int* ptr_connection_socket;
         pthread_mutex_lock(&mutex);
-		if((ptr_connetion_socket = dequeue()) == NULL){
+		if((ptr_connection_socket = dequeue()) == NULL){
 		    pthread_cond_wait(&condition_variable, &mutex);
-			ptr_connetion_socket = dequeue();
+			ptr_connection_socket = dequeue();
 		}
 		pthread_mutex_unlock(&mutex);
-		if (ptr_connetion_socket != NULL) {
-            th_handle_connection(ptr_connetion_socket);
+		if (ptr_connection_socket != NULL) {
+      th_handle_connection(ptr_connection_socket);
+		  free(ptr_connection_socket);
 		}
 	}
     return NULL;

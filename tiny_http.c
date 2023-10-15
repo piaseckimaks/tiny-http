@@ -1,6 +1,6 @@
 #include <stdint.h>
 #include <uchar.h>
-#define _GNU_SOURCE
+#define _GNU_SOURCEtin
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,8 +74,9 @@ void th_create_epoll(){
 */
 void th_epoll_event_loop(){
 	struct epoll_event events_container[MAX_EVENTS];
-    int connection_socket, nfds;
+  
  	while(1){
+		int nfds;
 		error_check((nfds = epoll_wait(server.epollfd, events_container, MAX_EVENTS, 0)),"epoll_wait");
         
 		if(nfds == 0){
@@ -83,18 +84,19 @@ void th_epoll_event_loop(){
 		}
 		
 		for(int n = 0; n < nfds; ++n){
-            if(events_container[n].data.fd == STDIN_FILENO){
+
+			if(events_container[n].data.fd == STDIN_FILENO){
 				char* line = NULL;
 				size_t linelen = 0;
 				int read = getline(&line, &linelen, stdin);
 				if(read < 0){
-				    perror("Getline: stdin");
-			        exit(EXIT_FAILURE);
-			    }
+						perror("Getline: stdin");
+							exit(EXIT_FAILURE);
+					}
 				if(strcmp(line, "stop\n") == 0){
 					printf("stoping server...\n");
-	                close(server.tcpfd);
-                    exit(EXIT_SUCCESS);
+									close(server.tcpfd);
+										exit(EXIT_SUCCESS);
 				}
 
 				printf("Read: %.*s", read, line);
@@ -110,13 +112,16 @@ void th_epoll_event_loop(){
 				continue;
 			}
       #endif
-
-			error_check(connection_socket = accept(server.tcpfd, NULL, NULL), "accept");
-           
-			if(connection_socket > 0){
-			  int* ptr_connection_socket = malloc(sizeof(int));
-			  *ptr_connection_socket = connection_socket;
-			  th_delegate_work(ptr_connection_socket);	
+     
+      if(events_container[n].data.fd == server.tcpfd){
+				int connection_socket = 0;
+				error_check(connection_socket = accept(server.tcpfd, NULL, NULL), "accept");
+						 
+				if(connection_socket > 0){
+					int* ptr_connection_socket = malloc(sizeof(int));
+					*ptr_connection_socket = connection_socket;
+					th_delegate_work(ptr_connection_socket);	
+				}
 			}
 		}
 	}
@@ -130,7 +135,7 @@ void th_epoll_event_loop(){
 */
 void error_check(int status, const char* message){
 	if(status == -1){
-        printf("%s -- errno: %i\n", message, errno);
+    printf("%s -- errno: %i\n", message, errno);
 		printf("%s\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
@@ -166,29 +171,7 @@ void request_string_to_struct(char* request_string, request_t* request){
 		add_header(head, header);
 	} 
 }
-/*
-* Adds route to the server
-*/ 
-void th_add_route(const char* method, const char* path, void (*handler_func)()){
-  th_route_t route;
-	route.method = method;
-	route.route = path;
-	route.handle_function = handler_func;
-    
-	printf("Adding route: %s %s\n", method, path);
-	if(routes == NULL){
-	  printf("route: %s %s is first\n", method, path);
-    routes = malloc(sizeof(th_route_t));
-		*routes = route;
-		routes_count ++;
-	  return;
-	}
 
-
-    routes = realloc(routes, (routes_count + 1) * sizeof(th_route_t));
-    routes[routes_count] = route;
-		routes_count ++;
-}
 
 // Needed for QUIC ??
 #ifdef UDP_ENABLED

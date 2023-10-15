@@ -6,12 +6,6 @@
 typedef char BYTE;
 
 typedef struct{
-    const char* route;
-    const char* method;
-	void (*handle_function)();
-} th_route_t;
-
-typedef struct{
     uint32_t ip_addr;
     uint16_t tcp_port;
 	uint16_t udp_port;
