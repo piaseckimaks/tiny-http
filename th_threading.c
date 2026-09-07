@@ -16,6 +16,7 @@ void th_delegate_work(void* ptr_connection_socket){
 * if there is available work for them in queue
 */
 void* th_threads_work(void* arg){
+	(void)arg;
 	while(1){
         int* ptr_connection_socket;
         pthread_mutex_lock(&mutex);

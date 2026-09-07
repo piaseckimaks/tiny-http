@@ -14,7 +14,7 @@ void change_number(int* ptr_number, int to_number){
 void print_sum(const char* str){
 	printf("%s: ", str);
     int sum = 0;
-    for(int i = 0; i < strlen(str); i++){
+    for(size_t i = 0; i < strlen(str); i++){
         sum += (int)str[i];
     }
     printf("%i\n", sum);
@@ -25,6 +25,8 @@ void handle_root(){
 }
 
 int main(int argc, const char** argv){
+	(void)argc;
+	(void)argv;
 	//const char* get = "GET";
 	//const char* post = "POST";
 	//const char* put = "PUT";
@@ -34,10 +36,9 @@ int main(int argc, const char** argv){
 	//print_sum(put);
 	//print_sum(delete);
 	//return 0;
-	system("clear"); 
-	char* file_content = NULL;
-	th_load_file("./file", file_content);
-  th_create_server("0.0.0.0", 80);
+	char* file_content = th_load_file("./file");
+	free(file_content);
+  th_create_server("0.0.0.0", 8080);
   th_add_route("GET", "/", handle_root);	
   th_add_route("GET", "/login", handle_root);	
   th_add_route("GET", "/meme", handle_root);	
