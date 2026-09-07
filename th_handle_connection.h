@@ -1,17 +1,9 @@
-#include <stdio.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/syscall.h>
+#ifndef TH_HANDLE_CONNECTION_H
+#define TH_HANDLE_CONNECTION_H
 
-typedef struct{
-    const char* route;
-    const char* method;
-	void (*handle_function)();
-} th_route_t;
+#include "tiny_http.h"
 
+/* Serves exactly one request on fd and closes it. Runs on a worker. */
+void th_handle_connection(th_server_t* server, int fd);
 
-void* th_handle_connection(void* ptr_connection_socket);
-void th_add_route(const char* method, const char* path, void (*handler_func)());
+#endif

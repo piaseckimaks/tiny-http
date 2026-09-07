@@ -1,213 +1,256 @@
-#define _GNU_SOURCE
-#include <stdint.h>
-#include <unistd.h>
-#include <netinet/in.h>
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* pipe2, accept4, memmem */
+#endif
+#include "tiny_http.h"
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h> 
 #include <sys/epoll.h>
-#include <arpa/inet.h>
-#include <sys/un.h>
-#include <errno.h>
-#include "tiny_http.h"
-#include "console_utils.h"
-#include "th_file_utils.h"
-#include "th_threading.h"
+#include <sys/socket.h>
+#include <unistd.h>
 
-#define PORT 8000
-#define MAX_EVENTS 10
+#include "th_internal.h"
 
-tiny_http_t server;
-/*
- * It creates file descriptor for TCP socket and call th_create_epoll to create epoll event loop.
- */
-void th_create_server( const char* ip, int port){
-    server.ip_addr = inet_addr(ip);
-	server.tcp_port = htons(port);  
-
-  th_create_threads();
-
-	error_check((server.tcpfd = socket(AF_INET, SOCK_STREAM, 0)), "Failed to create TCP socket");
-
-	int reuse = 1;
-	error_check(setsockopt(server.tcpfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)), "setsockopt: SO_REUSEADDR");
-
-    th_create_epoll();
+th_config_t th_config_default(void){
+	th_config_t c = {
+		.threads = 8,
+		.read_timeout_ms = 5000,
+		.write_timeout_ms = 10000,
+		.max_header_bytes = 8192,
+		.max_body_bytes = 1u << 20,
+		.backlog = 128,
+		.log_requests = 1,
+	};
+	return c;
 }
 
-/* 
- * Binds the TCP socket to specified IP address, starts listening and calls th_epoll_event_loop
- */
-void th_server_listen(){
-	struct sockaddr_in s_addr_in;
-	s_addr_in.sin_addr.s_addr = server.ip_addr;
-	s_addr_in.sin_family = AF_INET;
-	s_addr_in.sin_port = server.tcp_port; 
-	error_check(bind(server.tcpfd, (struct sockaddr *) &s_addr_in, sizeof(s_addr_in)), "Failed to bind TCP");
-	printf("TCP binded to %s port %i\n", inet_ntoa(s_addr_in.sin_addr), ntohs(server.tcp_port));
-	error_check(listen(server.tcpfd, 50), "Listen failed");
-  	printf("Server listening for incoming connections\n");
-  	printf("Type stop to gracefully terminate the server\n");
-	th_epoll_event_loop();
+th_server_t* th_server_create(const char* ip, int port, const th_config_t* cfg){
+	if(port < 1 || port > 65535){
+		errno = EINVAL;
+		return NULL;
+	}
+	th_server_t* s = calloc(1, sizeof *s);
+	if(s == NULL){
+		return NULL;
+	}
+	s->cfg = cfg ? *cfg : th_config_default();
+	if(s->cfg.threads < 1){
+		s->cfg.threads = 1;
+	}
+	s->listen_fd = -1;
+	s->epoll_fd = -1;
+	s->addr.sin_family = AF_INET;
+	s->addr.sin_port = htons((uint16_t)port);
+	if(inet_pton(AF_INET, ip, &s->addr.sin_addr) != 1){
+		free(s);
+		errno = EINVAL;
+		return NULL;
+	}
+	if(pipe2(s->wake_fd, O_CLOEXEC | O_NONBLOCK) != 0){
+		free(s);
+		return NULL;
+	}
+	/* A peer that resets mid-reply must not kill the process. */
+	signal(SIGPIPE, SIG_IGN);
+	return s;
 }
-/*
-	* Creates epoll file descriptor, adds TCP socket and STDIN file descriptors
-*/
 
-void th_create_epoll(){
-  error_check((server.epollfd = epoll_create1(0)), "Failed to create epoll file descriptor");
-    
-  struct epoll_event ev;
-	ev.events = EPOLLIN;
-	ev.data.fd = server.tcpfd;
+int th_server_add_route(th_server_t* s, const char* method, const char* path, th_handler_t handler){
+	if(s->running || handler == NULL || *method == '\0' || *path != '/'){
+		errno = EINVAL;
+		return -1;
+	}
+	th_route_t* grown = realloc(s->routes, (s->route_count + 1) * sizeof *grown);
+	if(grown == NULL){
+		return -1;
+	}
+	s->routes = grown;
+	th_route_t* r = &s->routes[s->route_count];
+	r->method = strdup(method);
+	r->path = strdup(path);
+	r->handler = handler;
+	if(r->method == NULL || r->path == NULL){
+		free(r->method);
+		free(r->path);
+		return -1;
+	}
+	/* Normalise like the parser does so "/x/" and "/x" are one route. */
+	size_t plen = strlen(r->path);
+	while(plen > 1 && r->path[plen - 1] == '/'){
+		r->path[--plen] = '\0';
+	}
+	s->route_count++;
+	return 0;
+}
 
-	error_check(epoll_ctl(server.epollfd, EPOLL_CTL_ADD, server.tcpfd, &ev), "epoll_ctl: failed to add TCP file descriptor");
+void th_server_stop(th_server_t* s){
+	char b = 1;
+	ssize_t r = write(s->wake_fd[1], &b, 1);
+	(void)r;
+}
 
-	ev.events = EPOLLIN;
-	ev.data.fd = STDIN_FILENO;
+/* Signal handling: the handler only writes to the self-pipe. */
+static volatile sig_atomic_t g_wake_fd = -1;
 
-	if(epoll_ctl(server.epollfd, EPOLL_CTL_ADD, STDIN_FILENO, &ev) == -1){
-		printf("stdin is not pollable (%s), console commands disabled\n", strerror(errno));
+static void on_signal(int sig){
+	(void)sig;
+	int fd = g_wake_fd;
+	if(fd >= 0){
+		char b = 1;
+		ssize_t r = write(fd, &b, 1);
+		(void)r;
+	}
+}
+
+static void set_timeout(int fd, int opt, int ms){
+	struct timeval tv = { .tv_sec = ms / 1000, .tv_usec = (ms % 1000) * 1000 };
+	setsockopt(fd, SOL_SOCKET, opt, &tv, sizeof tv);
+}
+
+static int epoll_add(int epfd, int fd){
+	struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd };
+	return epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+static int open_listener(th_server_t* s){
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if(fd < 0){
+		return -1;
+	}
+	int one = 1;
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	if(bind(fd, (struct sockaddr*)&s->addr, sizeof s->addr) != 0 ||
+	   listen(fd, s->cfg.backlog) != 0){
+		int saved = errno;
+		close(fd);
+		errno = saved;
+		return -1;
+	}
+	s->listen_fd = fd;
+	return 0;
+}
+
+static void accept_one(th_server_t* s){
+	int fd = accept4(s->listen_fd, NULL, NULL, SOCK_CLOEXEC);
+	if(fd < 0){
+		switch(errno){
+			case EAGAIN:
+			case EINTR:
+			case ECONNABORTED:
+				return; /* routine, nothing to do */
+			case EMFILE:
+			case ENFILE:
+				fprintf(stderr, "tiny-http: accept: %s\n", strerror(errno));
+				usleep(10000); /* the listener stays readable; avoid a hot spin */
+				return;
+			default:
+				fprintf(stderr, "tiny-http: accept: %s\n", strerror(errno));
+				return;
+		}
+	}
+	set_timeout(fd, SO_RCVTIMEO, s->cfg.read_timeout_ms);
+	set_timeout(fd, SO_SNDTIMEO, s->cfg.write_timeout_ms);
+	if(th_pool_submit(s->pool, fd) != 0){
+		close(fd);
+	}
+}
+
+int th_server_listen(th_server_t* s){
+	if(s->running){
+		errno = EBUSY;
+		return -1;
+	}
+	if(open_listener(s) != 0){
+		return -1;
+	}
+	s->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+	if(s->epoll_fd < 0 ||
+	   epoll_add(s->epoll_fd, s->listen_fd) != 0 ||
+	   epoll_add(s->epoll_fd, s->wake_fd[0]) != 0){
+		return -1;
+	}
+	s->pool = th_pool_create(s->cfg.threads, s);
+	if(s->pool == NULL){
+		return -1;
 	}
 
+	struct sigaction sa, old_int, old_term;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = on_signal;
+	sigemptyset(&sa.sa_mask);
+	g_wake_fd = s->wake_fd[1];
+	sigaction(SIGINT, &sa, &old_int);
+	sigaction(SIGTERM, &sa, &old_term);
 
-}
-/*
-* Starts epoll event loop
-*/
-void th_epoll_event_loop(){
-	struct epoll_event events_container[MAX_EVENTS];
-  
- 	while(1){
-		int nfds;
-		nfds = epoll_wait(server.epollfd, events_container, MAX_EVENTS, -1);
-		if(nfds == -1){
+	s->running = 1;
+	char ip[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &s->addr.sin_addr, ip, sizeof ip);
+	fprintf(stdout, "tiny-http listening on %s:%d with %d worker threads\n",
+	        ip, ntohs(s->addr.sin_port), s->cfg.threads);
+
+	int rc = 0;
+	int stop = 0;
+	struct epoll_event events[16];
+	while(!stop){
+		int n = epoll_wait(s->epoll_fd, events, 16, -1);
+		if(n < 0){
 			if(errno == EINTR){
 				continue;
 			}
-			error_check(nfds, "epoll_wait");
+			rc = -1;
+			break;
 		}
-		
-		for(int n = 0; n < nfds; ++n){
-
-			if(events_container[n].data.fd == STDIN_FILENO){
-				char* line = NULL;
-				size_t linelen = 0;
-				ssize_t read = getline(&line, &linelen, stdin);
-				if(read < 0){
-					printf("stdin closed, console commands disabled\n");
-					epoll_ctl(server.epollfd, EPOLL_CTL_DEL, STDIN_FILENO, NULL);
-					free(line);
-					continue;
+		for(int i = 0; i < n; i++){
+			int fd = events[i].data.fd;
+			if(fd == s->wake_fd[0]){
+				char drain[64];
+				while(read(s->wake_fd[0], drain, sizeof drain) > 0){
 				}
-				if(strcmp(line, "stop\n") == 0){
-					printf("stoping server...\n");
-					free(line);
-					close(server.tcpfd);
-					exit(EXIT_SUCCESS);
-				}
-
-				printf("Read: %.*s", (int)read, line);
-				free(line);
-				continue;
-			}
-			
-			#ifdef UDP_ENABLED
-			if(events_container[n].data.fd == udp_socket){
-				printf("Got data on UDP port\n");
-				char buf[512];
-                recvfrom(udp_socket, buf, 512, 0, NULL, NULL);
-                printf("%s\n", buf);
-				continue;
-			}
-      #endif
-     
-      if(events_container[n].data.fd == server.tcpfd){
-				int connection_socket = 0;
-				error_check(connection_socket = accept(server.tcpfd, NULL, NULL), "accept");
-						 
-				if(connection_socket > 0){
-					int* ptr_connection_socket = malloc(sizeof(int));
-					*ptr_connection_socket = connection_socket;
-					th_delegate_work(ptr_connection_socket);	
-				}
+				stop = 1;
+			} else if(fd == s->listen_fd){
+				accept_one(s);
 			}
 		}
 	}
 
-	close(server.tcpfd);
-   
+	/* Stop accepting first, then let workers finish what is queued. */
+	fprintf(stdout, "tiny-http stopping, draining %d worker threads\n", s->cfg.threads);
+	close(s->listen_fd);
+	s->listen_fd = -1;
+	th_pool_stop(s->pool);
+	s->pool = NULL;
+
+	sigaction(SIGINT, &old_int, NULL);
+	sigaction(SIGTERM, &old_term, NULL);
+	g_wake_fd = -1;
+	close(s->epoll_fd);
+	s->epoll_fd = -1;
+	s->running = 0;
+	fprintf(stdout, "tiny-http stopped\n");
+	return rc;
 }
 
-/*
-* Error check for files descriptor related errors
-*/
-void error_check(int status, const char* message){
-	if(status == -1){
-    printf("%s -- errno: %i\n", message, errno);
-		printf("%s\n", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-}
-
-/*
-* TODO: function to gracefully close server when 
-* command received from STDIN or in future signal SIGTERM
-*/
-
-void gracefully_stopserver(){
-	
-}
-
-
-/*
-* parsing http request string into struct
-* currently using strtok
-*/
-void request_string_to_struct(char* request_string, request_t* request){
-	request->method = strtok(request_string, " ");
-	request->route = strtok(NULL, " ");
-	request->http_version = strtok(NULL, "\r\n");
-	request->headers_list = NULL;
-	hl_node_t** head = &(request->headers_list);
-	char* token;
-	while((token = strtok(NULL, ":\r\n")) != NULL){
-		header_t* header = malloc(sizeof(header_t));
-		header->key = token;
-		char* value = strtok(NULL, "\r\n");
-		if(value == NULL){
-			value = "";
-		}
-		while(*value == ' '){
-			value++;
-		}
-		header->value = value;
-		add_header(head, header);
+void th_server_destroy(th_server_t* s){
+	if(s == NULL){
+		return;
 	}
+	for(size_t i = 0; i < s->route_count; i++){
+		free(s->routes[i].method);
+		free(s->routes[i].path);
+	}
+	free(s->routes);
+	if(s->listen_fd >= 0){
+		close(s->listen_fd);
+	}
+	if(s->epoll_fd >= 0){
+		close(s->epoll_fd);
+	}
+	close(s->wake_fd[0]);
+	close(s->wake_fd[1]);
+	free(s);
 }
-
-
-// Needed for QUIC ??
-#ifdef UDP_ENABLED
-void listen_udp(){
-    int udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-
-    printf("UDP socket file descriptor: %i\n", udp_socket);
-	struct sockaddr_in s_addr_in_udp;
-	s_addr_in_udp.sin_addr.s_addr = INADDR_ANY;
-	s_addr_in_udp.sin_family = AF_INET;
-	s_addr_in_udp.sin_port = htons(8080); 
-	printf("UDP binded to %s port %i\n", inet_ntoa(s_addr_in_udp.sin_addr), 8080);
-
-	error_check(bind(udp_socket, (struct sockaddr*) &s_addr_in_udp, sizeof(s_addr_in_udp)), "Failed to bind UDP");
-
-
-	ev.events = EPOLLIN;
-	ev.data.fd = udp_socket;
-
-	error_check(epoll_ctl(server.epollfd, EPOLL_CTL_ADD, udp_socket, &ev), "epoll_ctl: udp socket");
-
-    
-}
-#endif
