@@ -1,80 +1,91 @@
 #include "th_handle_connection.h"
 
-th_route_t* routes = NULL;
-int routes_count = 0;
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
-/*
-* Still under construction
-*/
-void* th_handle_connection(void* ptr_connection_socket){
-	pid_t thread_id = syscall(__NR_gettid);
-	printf("==========================\n");
-	printf("thread id: %i\n", thread_id);
-	printf("==========================\n");
-  int connection_socket = *((int*)ptr_connection_socket);
-	printf("for connection socket number: %i\n", connection_socket);
-	printf("==========================\n");
-  const char* response = "HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n <h1>404 Not found</h1>";
+#include "th_internal.h"
 
-	char buffer[1024];
-	int recv_bytes = recv(connection_socket, buffer, sizeof(buffer) - 1, 0);
-	if(recv_bytes <= 0){
-		recv_bytes = 0;
+static void plain_error(th_response_t* res, int status){
+	th_response_set_status(res, status);
+	th_response_printf(res, "%d %s\n", status, th_status_text(status));
+}
+
+/* Maps a failed read to a status code. Returns 0 when the connection
+ * should simply be closed with no reply. */
+static int status_for_read(th_read_status_t st){
+	switch(st){
+		case TH_READ_TIMEOUT:           return 408;
+		case TH_READ_BAD:               return 400;
+		case TH_READ_HEADERS_TOO_LARGE: return 431;
+		case TH_READ_BODY_TOO_LARGE:    return 413;
+		case TH_READ_UNSUPPORTED:       return 501;
+		case TH_READ_OK:
+		case TH_READ_CLOSED:
+		case TH_READ_ERROR:
+		default:                        return 0;
 	}
-	buffer[recv_bytes] = '\0';
+}
 
-	//printf("%s", buffer);
-	//usleep(300000);
-	//system("clear");
-  //request_t* request = malloc(sizeof(request_t));
-	//request_string_to_struct(buffer, request);
-  char* method = strtok(buffer, " ");
-	char* route = strtok(NULL, " ");
-	
-	printf("\nrecv_bytes: %i \n Thread id %i Checking route %s with method %s\n",recv_bytes, thread_id, route, method);
+static void route(th_server_t* s, const th_request_t* req, th_response_t* res){
+	th_handler_t handler = NULL;
+	char allow[256] = "";
 
-  if(method == NULL || route == NULL){
-    printf("Failed to read a route or method from request!\n");
-	  send(connection_socket, response, strlen(response), 0);
-	  close(connection_socket);
-		return NULL;
+	for(size_t i = 0; i < s->route_count; i++){
+		const th_route_t* r = &s->routes[i];
+		if(strcmp(r->path, req->path) != 0){
+			continue;
+		}
+		if(strcmp(r->method, req->method) == 0){
+			handler = r->handler;
+			break;
+		}
+		if(allow[0] != '\0'){
+			strncat(allow, ", ", sizeof allow - strlen(allow) - 1);
+		}
+		strncat(allow, r->method, sizeof allow - strlen(allow) - 1);
 	}
 
-    for(int i = 0; i < routes_count; i++){
-		    
-        if(!strcmp(routes[i].method, method) && !strcmp(routes[i].route, route)){
-			      routes[i].handle_function();
-            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n <h1>Hello</h1>";	
+	if(handler != NULL){
+		handler(req, res);
+	} else if(allow[0] != '\0'){
+		th_response_set_header(res, "Allow", allow);
+		plain_error(res, 405);
+	} else {
+		plain_error(res, 404);
+	}
+}
+
+void th_handle_connection(th_server_t* s, int fd){
+	th_request_t req;
+	th_response_t res;
+	th_request_init(&req);
+	th_response_init(&res);
+
+	th_read_status_t st = th_request_read(fd, &req, s->cfg.max_header_bytes, s->cfg.max_body_bytes);
+	int reply = 1;
+	if(st == TH_READ_OK){
+		route(s, &req, &res);
+	} else {
+		int status = status_for_read(st);
+		if(status == 0){
+			reply = 0;
+		} else {
+			plain_error(&res, status);
 		}
 	}
-    
-    
 
-	send(connection_socket, response, strlen(response), 0);
-	//clean_hl_mem(request->headers_list);
-	close(connection_socket);
-	return NULL;
-}
-/*
-* Adds route to the server
-*/ 
-void th_add_route(const char* method, const char* path, void (*handler_func)()){
-  th_route_t route;
-	route.method = method;
-	route.route = path;
-	route.handle_function = handler_func;
-    
-	printf("Adding route: %s %s\n", method, path);
-	if(routes == NULL){
-	  printf("route: %s %s is first\n", method, path);
-    routes = malloc(sizeof(th_route_t));
-		*routes = route;
-		routes_count ++;
-	  return;
+	if(reply){
+		th_response_send(fd, &res);
+		if(s->cfg.log_requests){
+			fprintf(stdout, "%s %s -> %d\n",
+			        req.method ? req.method : "-",
+			        req.path ? req.path : "-",
+			        res.status);
+		}
 	}
 
-
-    routes = realloc(routes, (routes_count + 1) * sizeof(th_route_t));
-    routes[routes_count] = route;
-		routes_count ++;
+	close(fd);
+	th_request_free(&req);
+	th_response_free(&res);
 }

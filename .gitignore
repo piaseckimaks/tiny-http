@@ -1,2 +1,5 @@
+tiny-http
+tests/test_request
+*.o
+*.d
 a.out
-main.c
