@@ -1,6 +1,6 @@
+#define _GNU_SOURCE
 #include <stdint.h>
-#include <uchar.h>
-#define _GNU_SOURCEtin
+#include <unistd.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,8 +28,10 @@ void th_create_server( const char* ip, int port){
 
   th_create_threads();
 
-	server.tcpfd = socket(AF_INET, SOCK_STREAM, 0);
+	error_check((server.tcpfd = socket(AF_INET, SOCK_STREAM, 0)), "Failed to create TCP socket");
 
+	int reuse = 1;
+	error_check(setsockopt(server.tcpfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)), "setsockopt: SO_REUSEADDR");
 
     th_create_epoll();
 }
@@ -65,7 +67,9 @@ void th_create_epoll(){
 	ev.events = EPOLLIN;
 	ev.data.fd = STDIN_FILENO;
 
-	error_check(epoll_ctl(server.epollfd, EPOLL_CTL_ADD, STDIN_FILENO, &ev), "epoll_ctl: failed to add stdin file descriptor");
+	if(epoll_ctl(server.epollfd, EPOLL_CTL_ADD, STDIN_FILENO, &ev) == -1){
+		printf("stdin is not pollable (%s), console commands disabled\n", strerror(errno));
+	}
 
 
 }
@@ -77,10 +81,12 @@ void th_epoll_event_loop(){
   
  	while(1){
 		int nfds;
-		error_check((nfds = epoll_wait(server.epollfd, events_container, MAX_EVENTS, 0)),"epoll_wait");
-        
-		if(nfds == 0){
-			continue;
+		nfds = epoll_wait(server.epollfd, events_container, MAX_EVENTS, -1);
+		if(nfds == -1){
+			if(errno == EINTR){
+				continue;
+			}
+			error_check(nfds, "epoll_wait");
 		}
 		
 		for(int n = 0; n < nfds; ++n){
@@ -88,18 +94,22 @@ void th_epoll_event_loop(){
 			if(events_container[n].data.fd == STDIN_FILENO){
 				char* line = NULL;
 				size_t linelen = 0;
-				int read = getline(&line, &linelen, stdin);
+				ssize_t read = getline(&line, &linelen, stdin);
 				if(read < 0){
-						perror("Getline: stdin");
-							exit(EXIT_FAILURE);
-					}
+					printf("stdin closed, console commands disabled\n");
+					epoll_ctl(server.epollfd, EPOLL_CTL_DEL, STDIN_FILENO, NULL);
+					free(line);
+					continue;
+				}
 				if(strcmp(line, "stop\n") == 0){
 					printf("stoping server...\n");
-									close(server.tcpfd);
-										exit(EXIT_SUCCESS);
+					free(line);
+					close(server.tcpfd);
+					exit(EXIT_SUCCESS);
 				}
 
-				printf("Read: %.*s", read, line);
+				printf("Read: %.*s", (int)read, line);
+				free(line);
 				continue;
 			}
 			
@@ -158,18 +168,23 @@ void gracefully_stopserver(){
 void request_string_to_struct(char* request_string, request_t* request){
 	request->method = strtok(request_string, " ");
 	request->route = strtok(NULL, " ");
-    request->http_version = strtok(NULL, "\n");
-	char* token;
-    request->headers_list = NULL;
+	request->http_version = strtok(NULL, "\r\n");
+	request->headers_list = NULL;
 	hl_node_t** head = &(request->headers_list);
-    while(token != NULL){        
-        token = strtok(NULL, ":");
+	char* token;
+	while((token = strtok(NULL, ":\r\n")) != NULL){
 		header_t* header = malloc(sizeof(header_t));
 		header->key = token;
-		token = strtok(NULL, "\n");
-		header->value = token;
+		char* value = strtok(NULL, "\r\n");
+		if(value == NULL){
+			value = "";
+		}
+		while(*value == ' '){
+			value++;
+		}
+		header->value = value;
 		add_header(head, header);
-	} 
+	}
 }
 
 

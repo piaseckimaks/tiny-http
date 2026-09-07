@@ -10,13 +10,14 @@ void add_header(hl_node_t** head, header_t* header){
 
     if(*head == NULL){
         *head = temp;
-	} else if ((*head)->next == NULL) {
-		(*head)->next = temp;
-	} else {
-        p = (*head)->next;
-		(*head)->next = temp;
-		temp->next = p;
-	}
+        return;
+    }
+
+    p = *head;
+    while(p->next != NULL){
+        p = p->next;
+    }
+    p->next = temp;
 }
 
 void clean_hl_mem(hl_node_t* head){

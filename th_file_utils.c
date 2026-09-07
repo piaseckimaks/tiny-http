@@ -2,26 +2,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-char* th_load_file(const char* file_path, char* file_content){
+char* th_load_file(const char* file_path){
 	printf("Loading file...\n");
-	if (file_content != NULL) {
-	    perror("th_load_file: Pointer for file content should be NULL pointer");
-	    return NULL;
-	}
 
-	FILE* file = fopen(file_path, "r");
-	
+	FILE* file = fopen(file_path, "rb");
 	if(file == NULL){
-		perror("th_load_file: file doesn't exists");
+		perror("th_load_file: cannot open file");
 		return NULL;
 	}
 
-	char* buffer = malloc(sizeof(char));
-	int char_count = 1;
-	while(fread(buffer, sizeof(char), 1, file)){
-        file_content = realloc(file_content, char_count * sizeof(char));
-		file_content[char_count] = *buffer;
+	if(fseek(file, 0, SEEK_END) != 0){
+		perror("th_load_file: fseek");
+		fclose(file);
+		return NULL;
+	}
+	long size = ftell(file);
+	if(size < 0){
+		perror("th_load_file: ftell");
+		fclose(file);
+		return NULL;
+	}
+	rewind(file);
+
+	char* file_content = malloc((size_t)size + 1);
+	if(file_content == NULL){
+		perror("th_load_file: malloc");
+		fclose(file);
+		return NULL;
 	}
 
-	return file_content; 
+	size_t read = fread(file_content, 1, (size_t)size, file);
+	file_content[read] = '\0';
+	fclose(file);
+
+	return file_content;
 }
