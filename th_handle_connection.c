@@ -17,7 +17,11 @@ void* th_handle_connection(void* ptr_connection_socket){
   const char* response = "HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n <h1>404 Not found</h1>";
 
 	char buffer[1024];
-	int recv_bytes = recv(connection_socket, buffer, 1024, 0);
+	int recv_bytes = recv(connection_socket, buffer, sizeof(buffer) - 1, 0);
+	if(recv_bytes <= 0){
+		recv_bytes = 0;
+	}
+	buffer[recv_bytes] = '\0';
 
 	//printf("%s", buffer);
 	//usleep(300000);
@@ -39,7 +43,7 @@ void* th_handle_connection(void* ptr_connection_socket){
     for(int i = 0; i < routes_count; i++){
 		    
         if(!strcmp(routes[i].method, method) && !strcmp(routes[i].route, route)){
-			      routes->handle_function();
+			      routes[i].handle_function();
             response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n <h1>Hello</h1>";	
 		}
 	}
